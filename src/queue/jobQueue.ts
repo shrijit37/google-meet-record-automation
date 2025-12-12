@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { config } from '../config/config.js';
 
 export interface MeetingJob {
     id: string;
@@ -12,11 +13,14 @@ export interface MeetingJob {
     completedAt?: Date;
 }
 
+/**
+ * Concurrent job queue supporting multiple simultaneous meetings.
+ */
 export class JobQueue {
     private queue: MeetingJob[] = [];
-    private currentJob: MeetingJob | null = null;
-    private isProcessing: boolean = false;
+    private activeJobs: Map<string, MeetingJob> = new Map();
     private processCallback: ((job: MeetingJob) => Promise<void>) | null = null;
+    private scheduledTimers: Map<string, NodeJS.Timeout> = new Map();
 
     /**
      * Set the callback function that processes jobs
@@ -41,68 +45,116 @@ export class JobQueue {
         this.queue.push(job);
         console.log(`📥 Job added: ${job.id} - ${meetingUrl}`);
 
-        // Start processing if not already
+        // Start processing
         this.processNext();
 
         return job;
     }
 
     /**
-     * Process the next job in the queue
+     * Process next available job(s) - supports concurrent processing
      */
     private async processNext(): Promise<void> {
-        if (this.isProcessing || !this.processCallback) {
+        if (!this.processCallback) {
             return;
         }
 
-        // Check for scheduled jobs
         const now = new Date();
-        const readyJob = this.queue.find(
+
+        // Find all queued jobs that are ready
+        const readyJobs = this.queue.filter(
             (job) => job.status === 'queued' && (!job.scheduledTime || job.scheduledTime <= now)
         );
 
-        if (!readyJob) {
-            // Check if there are scheduled jobs waiting
-            const pendingScheduled = this.queue.filter(
-                (job) => job.status === 'queued' && job.scheduledTime && job.scheduledTime > now
-            );
-
-            if (pendingScheduled.length > 0) {
-                const nextScheduled = pendingScheduled.sort(
-                    (a, b) => (a.scheduledTime?.getTime() || 0) - (b.scheduledTime?.getTime() || 0)
-                )[0];
-
-                const delay = nextScheduled.scheduledTime!.getTime() - now.getTime();
-                console.log(`⏰ Next scheduled job in ${Math.round(delay / 1000)}s`);
-                setTimeout(() => this.processNext(), delay);
+        // Process as many jobs as we have slots for
+        for (const job of readyJobs) {
+            // Check if we have capacity
+            if (this.activeJobs.size >= config.maxConcurrentSessions) {
+                console.log(`⏳ Max concurrent (${config.maxConcurrentSessions}) reached. Job ${job.id} waiting.`);
+                break;
             }
-            return;
+
+            // Start processing this job (don't await - run in parallel)
+            this.processJob(job);
         }
 
-        this.isProcessing = true;
-        this.currentJob = readyJob;
-        readyJob.status = 'processing';
-        readyJob.startedAt = new Date();
+        // Schedule timer for any future scheduled jobs
+        this.scheduleUpcomingJobs();
+    }
 
-        console.log(`🔄 Processing job: ${readyJob.id}`);
+    /**
+     * Process a single job
+     */
+    private async processJob(job: MeetingJob): Promise<void> {
+        if (!this.processCallback) return;
+
+        job.status = 'processing';
+        job.startedAt = new Date();
+        this.activeJobs.set(job.id, job);
+
+        console.log(`🔄 Processing job: ${job.id} (active: ${this.activeJobs.size}/${config.maxConcurrentSessions})`);
 
         try {
-            await this.processCallback(readyJob);
-            readyJob.status = 'completed';
-            readyJob.completedAt = new Date();
-            console.log(`✅ Job completed: ${readyJob.id}`);
+            await this.processCallback(job);
+            // Note: Job completion is handled externally (when meeting ends)
+            // The callback should update status to 'in-meeting' while active
         } catch (error) {
-            readyJob.status = 'failed';
-            readyJob.error = error instanceof Error ? error.message : String(error);
-            readyJob.completedAt = new Date();
-            console.error(`❌ Job failed: ${readyJob.id}`, error);
+            job.status = 'failed';
+            job.error = error instanceof Error ? error.message : String(error);
+            job.completedAt = new Date();
+            this.activeJobs.delete(job.id);
+            console.error(`❌ Job failed: ${job.id}`, error);
+
+            // Try to process next job since we freed a slot
+            this.processNext();
         }
+    }
 
-        this.currentJob = null;
-        this.isProcessing = false;
+    /**
+     * Mark a job as completed and release its slot
+     */
+    completeJob(jobId: string, error?: string): void {
+        const job = this.getJob(jobId);
+        if (!job) return;
 
-        // Process next job
+        if (error) {
+            job.status = 'failed';
+            job.error = error;
+        } else {
+            job.status = 'completed';
+        }
+        job.completedAt = new Date();
+        this.activeJobs.delete(jobId);
+
+        console.log(`${error ? '❌' : '✅'} Job ${error ? 'failed' : 'completed'}: ${jobId}`);
+
+        // Process next queued job since we freed a slot
         this.processNext();
+    }
+
+    /**
+     * Schedule timers for upcoming jobs
+     */
+    private scheduleUpcomingJobs(): void {
+        const now = new Date();
+        const pendingScheduled = this.queue.filter(
+            (job) => job.status === 'queued' && job.scheduledTime && job.scheduledTime > now
+        );
+
+        for (const job of pendingScheduled) {
+            // Skip if already scheduled
+            if (this.scheduledTimers.has(job.id)) continue;
+
+            const delay = job.scheduledTime!.getTime() - now.getTime();
+            console.log(`⏰ Job ${job.id} scheduled in ${Math.round(delay / 1000)}s`);
+
+            const timer = setTimeout(() => {
+                this.scheduledTimers.delete(job.id);
+                this.processNext();
+            }, delay);
+
+            this.scheduledTimers.set(job.id, timer);
+        }
     }
 
     /**
@@ -113,10 +165,10 @@ export class JobQueue {
     }
 
     /**
-     * Get current job being processed
+     * Get all active jobs (currently processing or in-meeting)
      */
-    getCurrentJob(): MeetingJob | null {
-        return this.currentJob;
+    getActiveJobs(): MeetingJob[] {
+        return Array.from(this.activeJobs.values());
     }
 
     /**
@@ -127,24 +179,44 @@ export class JobQueue {
     }
 
     /**
-     * Get queue status
+     * Get queue status - now shows concurrent info
      */
-    getStatus(): { isProcessing: boolean; queueLength: number; currentJob: MeetingJob | null } {
+    getStatus(): {
+        activeCount: number;
+        maxConcurrent: number;
+        queueLength: number;
+        activeJobs: { id: string; meetingUrl: string; status: string }[];
+    } {
         return {
-            isProcessing: this.isProcessing,
+            activeCount: this.activeJobs.size,
+            maxConcurrent: config.maxConcurrentSessions,
             queueLength: this.queue.filter((j) => j.status === 'queued').length,
-            currentJob: this.currentJob,
+            activeJobs: this.getActiveJobs().map((j) => ({
+                id: j.id,
+                meetingUrl: j.meetingUrl,
+                status: j.status,
+            })),
         };
     }
 
     /**
-     * Update job status to in-meeting
+     * Update job status
      */
     updateJobStatus(jobId: string, status: MeetingJob['status']): void {
         const job = this.getJob(jobId);
         if (job) {
             job.status = status;
         }
+    }
+
+    /**
+     * Clear all scheduled timers (for cleanup)
+     */
+    clearTimers(): void {
+        for (const timer of this.scheduledTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.scheduledTimers.clear();
     }
 }
 

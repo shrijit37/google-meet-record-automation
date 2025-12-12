@@ -18,6 +18,9 @@ export const config = {
     // Browser
     headless: process.env.HEADLESS !== 'false',
 
+    // Concurrency
+    maxConcurrentSessions: parseInt(process.env.MAX_CONCURRENT_SESSIONS || '3', 10),
+
     // Timeouts (in milliseconds)
     pageLoadTimeout: 60000,
     elementTimeout: 30000,
