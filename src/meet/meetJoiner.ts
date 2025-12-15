@@ -1,21 +1,17 @@
 import { Page } from 'playwright';
 import { config } from '../config/config.js';
-import { browserManager } from '../browser/browserManager.js';
 
 export class MeetJoiner {
-    private page: Page | null = null;
+    private page: Page;
 
-    async initialize(): Promise<void> {
-        this.page = await browserManager.getPage();
+    constructor(page: Page) {
+        this.page = page;
     }
 
     /**
      * Join a Google Meet meeting
      */
     async joinMeeting(meetingUrl: string): Promise<boolean> {
-        if (!this.page) {
-            throw new Error('MeetJoiner not initialized');
-        }
 
         console.log(`🚀 Joining meeting: ${meetingUrl}`);
 
@@ -25,6 +21,9 @@ export class MeetJoiner {
                 waitUntil: 'networkidle',
                 timeout: config.pageLoadTimeout,
             });
+
+            // Check if we need to select an account
+            await this.handleAccountPicker();
 
             // Handle various states
             await this.handlePreJoinScreen();
@@ -38,10 +37,151 @@ export class MeetJoiner {
     }
 
     /**
+     * Handle Google account picker if it appears
+     */
+    private async handleAccountPicker(): Promise<void> {
+        console.log('🔍 Checking for account picker...');
+
+        try {
+            // Wait a bit for any redirects
+            await this.page.waitForTimeout(2000);
+
+            const url = this.page.url();
+
+            // Check if we're on an account selection page
+            if (url.includes('accounts.google.com') || url.includes('AccountChooser') || url.includes('signin')) {
+                console.log('👤 Account picker detected, selecting account...');
+
+                // Wait for page to fully load
+                await this.page.waitForLoadState('networkidle');
+                await this.page.waitForTimeout(1000);
+
+                // Strategy 1: Click on account list item (the main clickable row)
+                // This targets the Google account chooser list items
+                const accountListSelectors = [
+                    'li[data-authuser]', // List item with authuser
+                    'div[data-authuser]', // Div with authuser  
+                    '[data-identifier]', // Element with email identifier
+                    'ul li', // Generic list items in the account list
+                ];
+
+                for (const selector of accountListSelectors) {
+                    try {
+                        const accounts = await this.page.$$(selector);
+                        for (const account of accounts) {
+                            const text = await account.textContent();
+                            // Look for an account that has an email (contains @)
+                            if (text && text.includes('@')) {
+                                console.log(`🎯 Found account: ${text.substring(0, 50)}...`);
+                                await account.click();
+                                console.log('✅ Clicked account in picker');
+                                await this.page.waitForTimeout(3000);
+                                await this.page.waitForLoadState('networkidle');
+                                // Check for password page after account selection
+                                await this.handlePasswordEntry();
+                                return;
+                            }
+                        }
+                    } catch (e) {
+                        // Try next selector
+                    }
+                }
+
+                // Strategy 2: Click any element containing the email domain
+                try {
+                    const emailElement = this.page.locator('text=@').first();
+                    if (await emailElement.isVisible({ timeout: 2000 })) {
+                        // Get parent clickable element
+                        const parent = emailElement.locator('xpath=ancestor::li | ancestor::div[@role="link"] | ancestor::a').first();
+                        if (await parent.isVisible({ timeout: 1000 })) {
+                            await parent.click();
+                        } else {
+                            await emailElement.click();
+                        }
+                        console.log('✅ Clicked email element');
+                        await this.page.waitForTimeout(3000);
+                        await this.page.waitForLoadState('networkidle');
+                        // Check for password page
+                        await this.handlePasswordEntry();
+                        return;
+                    }
+                } catch (e) {
+                    // Continue
+                }
+
+                // Strategy 3: Click using coordinates on first visible account row
+                try {
+                    const accountRows = this.page.locator('ul > li, div[role="listitem"]');
+                    const firstRow = accountRows.first();
+                    if (await firstRow.isVisible({ timeout: 2000 })) {
+                        await firstRow.click();
+                        console.log('✅ Clicked first account row');
+                        await this.page.waitForTimeout(3000);
+                        // Check for password page
+                        await this.handlePasswordEntry();
+                        return;
+                    }
+                } catch (e) {
+                    // Continue
+                }
+
+                console.log('⚠️ Could not auto-select account from picker');
+            }
+
+            // Check if we landed on password page after account selection
+            await this.handlePasswordEntry();
+        } catch (e) {
+            console.log('📝 No account picker detected, proceeding...');
+        }
+    }
+
+    /**
+     * Handle password entry page if Google requires re-authentication
+     */
+    private async handlePasswordEntry(): Promise<void> {
+        try {
+            await this.page.waitForTimeout(1000);
+            const url = this.page.url();
+
+            // Check if we're on a password entry page
+            if (url.includes('accounts.google.com') && (url.includes('signin') || url.includes('challenge'))) {
+                const passwordInput = await this.page.$('input[type="password"]');
+
+                if (passwordInput && await passwordInput.isVisible()) {
+                    console.log('🔐 Password page detected, entering password...');
+
+                    // Use password from config or environment
+                    const password = process.env.GOOGLE_PASSWORD || '';
+
+                    if (!password) {
+                        console.log('⚠️ No GOOGLE_PASSWORD set in environment');
+                        return;
+                    }
+
+                    await passwordInput.click();
+                    await passwordInput.fill(password);
+                    await this.page.waitForTimeout(500);
+
+                    // Click Next/Sign in button
+                    const nextButton = await this.page.$('#passwordNext, button[type="submit"], [data-idom-class*="action"]');
+                    if (nextButton) {
+                        await nextButton.click();
+                        console.log('✅ Submitted password');
+                        await this.page.waitForTimeout(3000);
+                        await this.page.waitForLoadState('networkidle');
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('📝 No password page or error:', e);
+        }
+    }
+
+    /**
      * Handle the pre-join screen (turn off camera/mic, click join)
      */
     private async handlePreJoinScreen(): Promise<void> {
-        if (!this.page) throw new Error('Page not initialized');
+
 
         console.log('📝 Handling pre-join screen...');
 
@@ -131,7 +271,6 @@ export class MeetJoiner {
      * Dismiss any popups that appear after joining
      */
     private async dismissPopups(): Promise<void> {
-        if (!this.page) return;
 
         const dismissSelectors = [
             'button:has-text("Got it")',
@@ -160,7 +299,6 @@ export class MeetJoiner {
      * Check if currently in a meeting
      */
     async isInMeeting(): Promise<boolean> {
-        if (!this.page) return false;
 
         try {
             const url = this.page.url();
@@ -181,7 +319,6 @@ export class MeetJoiner {
      * Leave the current meeting
      */
     async leaveMeeting(): Promise<boolean> {
-        if (!this.page) return false;
 
         try {
             console.log('👋 Leaving meeting...');
@@ -215,4 +352,4 @@ export class MeetJoiner {
     }
 }
 
-export const meetJoiner = new MeetJoiner();
+// Note: Singleton removed - create instances via MeetingSession

@@ -1,21 +1,17 @@
 import { Page } from 'playwright';
-import { browserManager } from '../browser/browserManager.js';
 
 export class RecordingHandler {
-    private page: Page | null = null;
+    private page: Page;
     private isRecording: boolean = false;
 
-    async initialize(): Promise<void> {
-        this.page = await browserManager.getPage();
+    constructor(page: Page) {
+        this.page = page;
     }
 
     /**
      * Start recording the current meeting
      */
     async startRecording(): Promise<boolean> {
-        if (!this.page) {
-            throw new Error('RecordingHandler not initialized');
-        }
 
         if (this.isRecording) {
             console.log('⚠️ Already recording');
@@ -138,9 +134,6 @@ export class RecordingHandler {
      * Stop the current recording
      */
     async stopRecording(): Promise<boolean> {
-        if (!this.page) {
-            throw new Error('RecordingHandler not initialized');
-        }
 
         if (!this.isRecording) {
             console.log('⚠️ Not currently recording');
@@ -200,7 +193,6 @@ export class RecordingHandler {
      * Open the "More options" menu
      */
     private async openMoreOptionsMenu(): Promise<void> {
-        if (!this.page) return;
 
         const menuSelectors = [
             '[aria-label="More options"]',
@@ -231,17 +223,58 @@ export class RecordingHandler {
      * Handle recording consent dialog ("Make sure that everyone is ready")
      */
     private async handleRecordingConsent(): Promise<void> {
-        if (!this.page) return;
 
-        console.log('🔍 Looking for recording consent dialog...');
+        console.log('🔍 Looking for recording consent dialog or Start button...');
 
         try {
-            // Wait for the consent dialog to appear
+            // Wait for the dialog/panel to appear
             await this.page.waitForTimeout(2000);
 
             // First, dismiss any Gemini/AI popups that might be overlaying
             await this.dismissOverlayPopups();
             await this.page.waitForTimeout(500);
+
+            // Strategy 0: Look for the Recording panel's Start button (when Manage recording was clicked)
+            // This shows up as a panel on the right with a blue "Start recording" button
+            console.log('🔄 Strategy 0: Looking for Start recording button in panel...');
+            const panelStartSelectors = [
+                'button:has-text("Start recording")',
+                '[role="button"]:has-text("Start recording")',
+                'button[data-mdc-dialog-action="confirm"]',
+                'button.mdc-button--unelevated', // Material Design filled button
+            ];
+
+            let clickedStartRecording = false;
+            for (const selector of panelStartSelectors) {
+                try {
+                    const btn = await this.page.$(selector);
+                    if (btn && await btn.isVisible()) {
+                        console.log(`🎯 Found Start recording button: ${selector}`);
+                        await btn.click({ force: true });
+                        console.log('✅ Clicked Start recording button');
+                        clickedStartRecording = true;
+                        await this.page.waitForTimeout(2000); // Wait for consent dialog to appear
+                        break;
+                    }
+                } catch (e) {
+                    // Try next
+                }
+            }
+
+            // Also try locator-based approach for the panel
+            if (!clickedStartRecording) {
+                try {
+                    const startRecBtn = this.page.locator('button', { hasText: /^Start recording$/i }).first();
+                    if (await startRecBtn.isVisible({ timeout: 1000 })) {
+                        await startRecBtn.click({ force: true });
+                        console.log('✅ Clicked Start recording via locator');
+                        clickedStartRecording = true;
+                        await this.page.waitForTimeout(2000);
+                    }
+                } catch (e) {
+                    // Continue
+                }
+            }
 
             // Check if the consent dialog is visible
             const dialogText = await this.page.locator('text=/Make sure that everyone is ready/i').isVisible({ timeout: 3000 }).catch(() => false);
@@ -338,7 +371,6 @@ export class RecordingHandler {
      * Dismiss any overlay popups (Gemini, tooltips, etc.)
      */
     private async dismissOverlayPopups(): Promise<void> {
-        if (!this.page) return;
 
         try {
             // Look for "Got it" buttons (Gemini popup)
@@ -370,7 +402,6 @@ export class RecordingHandler {
      * Handle stop recording confirmation
      */
     private async handleStopConfirmation(): Promise<void> {
-        if (!this.page) return;
 
         try {
             await this.page.waitForTimeout(1000);
@@ -403,7 +434,6 @@ export class RecordingHandler {
      * Check if recording is currently active
      */
     async checkRecordingStatus(): Promise<boolean> {
-        if (!this.page) return false;
 
         try {
             // Look for recording indicator (usually a red dot or "REC" text)
@@ -435,4 +465,4 @@ export class RecordingHandler {
     }
 }
 
-export const recordingHandler = new RecordingHandler();
+// Note: Singleton removed - create instances via MeetingSession
