@@ -133,10 +133,28 @@ export class SessionPool {
     }
 
     /**
+     * Check if browser is running in headless mode
+     */
+    isHeadless(): boolean {
+        return this.headless;
+    }
+
+    /**
      * Check if logged in (by testing session validity)
      */
     async isLoggedIn(): Promise<boolean> {
         return this.sessionManager.hasValidSession();
+    }
+
+    /**
+     * Save session from a context (call after successful login)
+     */
+    async saveSessionFromContext(context: import('playwright').BrowserContext): Promise<void> {
+        console.log('💾 Saving session after successful login...');
+        await this.sessionManager.saveSession(context);
+        // Update stored state for future sessions
+        this.storageState = await this.sessionManager.loadSession();
+        console.log('✅ Session saved');
     }
 
     /**

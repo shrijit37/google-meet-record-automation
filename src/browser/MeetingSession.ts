@@ -115,6 +115,13 @@ export class MeetingSession {
     }
 
     /**
+     * Get the browser context (for saving session)
+     */
+    getContext(): BrowserContext {
+        return this.context;
+    }
+
+    /**
      * Check if session is active
      */
     isActive(): boolean {

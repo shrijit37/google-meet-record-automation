@@ -33,6 +33,9 @@ async function initializeAutomation(): Promise<void> {
                 throw new Error('Failed to join meeting');
             }
 
+            // Save session after successful join (persists login cookies)
+            await sessionPool.saveSessionFromContext(session.getContext());
+
             jobQueue.updateJobStatus(job.id, 'in-meeting');
 
             // Start recording if requested
@@ -98,10 +101,17 @@ app.post('/api/join-meeting', async (req: Request, res: Response) => {
         return;
     }
 
-    // Reinitialize pool in headed mode if requested
-    if (headless === false) {
-        console.log('🖥️ Switching to headed mode (visible browser)...');
-        await sessionPool.reinitialize(false);
+    // Reinitialize pool if headless mode is explicitly specified and differs from current
+    if (headless !== undefined) {
+        const currentHeadless = sessionPool.isHeadless();
+        if (headless !== currentHeadless) {
+            if (headless) {
+                console.log('🤖 Switching to headless mode...');
+            } else {
+                console.log('🖥️ Switching to headed mode (visible browser)...');
+            }
+            await sessionPool.reinitialize(headless);
+        }
     }
 
     // Parse scheduled time if provided
