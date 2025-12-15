@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  google-meet-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: google-meet-bot
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - HEADLESS=${HEADLESS:-true}
+      - SESSION_DIR=/app/sessions
+      - MAX_CONCURRENT_SESSIONS=${MAX_CONCURRENT_SESSIONS:-3}
+      - GOOGLE_EMAIL=${GOOGLE_EMAIL:-}
+      - GOOGLE_PASSWORD=${GOOGLE_PASSWORD:-}
+    volumes:
+      # Persist sessions (including google-session.json) across container restarts
+      - ./sessions:/app/sessions
+    restart: unless-stopped
+    # Required for Playwright to work properly in Docker
+    shm_size: '2gb'
+    # Security: run as non-root user (Playwright image uses 'pwuser')
+    user: pwuser

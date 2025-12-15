@@ -44,11 +44,19 @@ async function initializeAutomation(): Promise<void> {
                 const recordingStarted = await session.startRecording();
                 if (!recordingStarted) {
                     console.log(`⚠️ Job ${job.id}: Could not start recording - continuing without recording`);
+                } else {
+                    console.log(`✅ Job ${job.id}: Recording started successfully`);
                 }
             }
 
-            // Job stays in "in-meeting" status
-            // Session remains active until user calls leave-meeting API or meeting ends
+            // Leave meeting after starting recording
+            console.log(`👋 Job ${job.id}: Leaving meeting...`);
+            await session.leaveMeeting();
+
+            // Release session and complete job
+            await sessionPool.releaseSession(job.id);
+            jobQueue.completeJob(job.id);
+            console.log(`✅ Job ${job.id}: Completed - joined, started recording, and left`);
         } catch (error) {
             // Release session on error
             await sessionPool.releaseSession(job.id);
